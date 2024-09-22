@@ -1,0 +1,319 @@
+<!-- junkroot verifyDD extreme beta test script, not even close to being released  -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bet Roll Verifier</title>
+    <style>
+        h1 { 
+            color: #aa34b1;
+            text-align: center;
+            margin-top: 50px;
+        }
+
+        body {
+            background-color: #222;
+            color: #ddd;
+        }
+
+        label {
+            color: #ddd;
+        }
+
+        #csvFile {
+            color: #ddd;
+        }
+
+        #results {
+            white-space: pre-wrap;
+            font-family: monospace;
+            background-color: black;
+            padding: 10px;
+            max-height: 400px;
+            overflow-y: scroll;
+            border: 1px solid #ddd;
+            margin-top: 20px;
+        }
+
+        #results .verified {
+            color: green;
+        }
+
+        #results .unverified {
+            color: red;
+        }
+
+        #results .error {
+            color: orange;
+        }
+
+        #loading {
+            margin-top: 20px;
+            display: none;
+        }
+
+        #progressBarContainer {
+            display: none;
+            width: 100%;
+            background-color: black;
+            margin-top: 10px;
+        }
+
+        #progressBar {
+            width: 1%;
+            height: 30px;
+            background-color: #4caf50;
+        }
+
+        .header-buttons {
+            position: absolute;
+            top: 10px;
+        }
+
+        .info-button {
+            right: 20px;
+            color: blue;
+            cursor: pointer;
+        }
+
+        .source-code-button {
+            left: 20px;
+            color: blue;
+            cursor: pointer;
+        }
+
+        #infoPopup, #summaryPopup {
+            display: none;
+            position: fixed;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            background-color: #333;
+            color: #fff;
+            padding: 20px;
+            border: 1px solid #ddd;
+            z-index: 1000;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        #infoPopupClose, #summaryPopupClose {
+            display: block;
+            text-align: right;
+            cursor: pointer;
+            color: red;
+        }
+    </style>
+</head>
+<body>
+    <h1>Bet Roll Verifier</h1>
+
+    <div class="header-buttons info-button" onclick="showInfo()">Information</div>
+    <a href="https://github.com/" target="_blank" class="header-buttons source-code-button">Source Code</a>
+
+    <label for="csvFile">Upload CSV File:</label>
+    <input type="file" id="csvFile" accept=".csv">
+    <br><br>
+
+    <label for="serverSeed">Server Seed:</label>
+    <input type="text" id="serverSeed">
+    <br><br>
+
+    <label for="clientSeed">Client Seed:</label>
+    <input type="text" id="clientSeed">
+    <br><br>
+
+    <button onclick="verifyRolls()">Verify Rolls</button>
+    <div id="loading">Verifying...</div>
+    <div id="progressBarContainer">
+        <div id="progressBar"></div>
+    </div>
+    <div id="results"></div>
+    <button id="downloadLog" style="display:none;" onclick="downloadLog()">Download Log</button>
+
+    <div id="infoPopup">
+        <div id="infoPopupClose" onclick="hideInfo()">X</div>
+        <p>This tool allows you to verify your bet rolls by comparing the server and client seeds...</p>
+    </div>
+
+    <div id="summaryPopup">
+        <div id="summaryPopupClose" onclick="hideSummary()">X</div>
+        <p id="summaryText"></p>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/js-sha512@0.8.0/src/sha512.min.js"></script>
+    <script>
+        function getRoll(serverSeed, clientSeed, nonce) {
+            var hash = sha512(serverSeed + clientSeed + nonce);
+            var index = 0;
+            var lucky;
+            do {
+                lucky = parseInt(hash.substr(index, 5), 16);
+                index += 5;
+            } while (lucky >= 1000000);
+            return lucky % 10000;
+        }
+
+        function getUrlParameters(url) {
+            if (!url || !url.includes('?')) {
+                console.warn('URL is invalid or does not contain query parameters:', url);
+                return { serverSeed: '', clientSeed: '', nonce: '' };
+            }
+
+            // Get query string part of the URL
+            const queryString = url.split('?')[1];
+
+            // Use URLSearchParams to extract serverSeed and nonce
+            const params = new URLSearchParams(queryString);
+            const serverSeed = params.get('serverSeed') || '';
+            const nonce = params.get('nonce') || '';
+
+            // Manually extract clientSeed, including spaces, from the query string
+            const clientSeedMatch = queryString.match(/clientSeed=([^&]*)/);
+            const clientSeed = clientSeedMatch ? decodeURIComponent(clientSeedMatch[1]) : '';
+
+            return { serverSeed, clientSeed, nonce };
+        }
+
+        async function verifyRolls() {
+            const fileInput = document.getElementById('csvFile');
+            let serverSeed = document.getElementById('serverSeed').value;
+            let clientSeed = document.getElementById('clientSeed').value;
+            const resultsDiv = document.getElementById('results');
+            const loadingDiv = document.getElementById('loading');
+            const progressBarContainer = document.getElementById('progressBarContainer');
+            const progressBar = document.getElementById('progressBar');
+
+            if (!fileInput.files.length) {
+                alert('Please upload a CSV file');
+                return;
+            }
+
+            const file = fileInput.files[0];
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const csvData = parseCSV(e.target.result);
+                console.log('CSV Data:', csvData);
+
+                resultsDiv.innerHTML = '';
+                loadingDiv.style.display = 'block';
+                progressBarContainer.style.display = 'block';
+
+                let logContent = '';
+                let totalRows = csvData.length - 1;
+                let batchSize = 1000;
+                let unverifiedCount = 0;
+
+                (async function processBatch(startIndex) {
+                    let endIndex = Math.min(startIndex + batchSize, totalRows);
+                    for (let index = startIndex; index < endIndex; index++) {
+                        if (index === 0) continue;
+
+                        const row = csvData[index];
+                        const nonce = row[4];
+
+                        // Scan all columns for a URL containing "http"
+                        let url = '';
+                        for (let i = 0; i < row.length; i++) {
+                            if (row[i].includes("http")) {
+                                url = row[i].match(/https?:\/\/[^\s"]+/)[0];
+                                break;
+                            }
+                        }
+
+                        console.log(`Row ${index}: Scanned URL = ${url}`);
+
+                        let currentServerSeed = serverSeed;
+                        let currentClientSeed = clientSeed;
+
+                        if (url) {
+                            const { serverSeed: urlServerSeed, clientSeed: urlClientSeed } = getUrlParameters(url);
+                            currentServerSeed = urlServerSeed || serverSeed;
+                            currentClientSeed = urlClientSeed || clientSeed;
+                            console.log(`Row ${index}: URL serverSeed = ${urlServerSeed}, URL clientSeed = ${urlClientSeed}`);
+                        }
+
+                        if (!currentServerSeed || !currentClientSeed) {
+                            const errorResult = document.createElement('div');
+                            errorResult.textContent = `Row ${index}: This roll could not be analyzed because no seed pair was found.`;
+                            errorResult.classList.add('error');
+                            resultsDiv.appendChild(errorResult);
+                            logContent += errorResult.textContent + '\n';
+                            continue;
+                        }
+
+                        const actualResult = row[5];
+                        const number = parseInt(row[7], 10);
+                        const calculatedRoll = getRoll(currentServerSeed, currentClientSeed, nonce);
+
+                        const result = document.createElement('div');
+                        if (calculatedRoll === number) {
+                            result.textContent = `Row ${index}: Roll verified (Calculated: ${calculatedRoll}, Expected: ${number}, Result: ${actualResult})`;
+                            result.classList.add('verified');
+                        } else {
+                            result.textContent = `Row ${index}: Roll unverified (Calculated: ${calculatedRoll}, Expected: ${number}, Result: ${actualResult})`;
+                            result.classList.add('unverified');
+                            unverifiedCount++;
+                        }
+                        resultsDiv.appendChild(result);
+                        logContent += result.textContent + '\n';
+                    }
+
+                    progressBar.style.width = ((endIndex / totalRows) * 100) + '%';
+
+                    if (endIndex < totalRows) {
+                        await new Promise(r => setTimeout(r, 100));
+                        processBatch(endIndex);
+                    } else {
+                        loadingDiv.style.display = 'none';
+                        progressBarContainer.style.display = 'none';
+                        document.getElementById('downloadLog').style.display = 'block';
+
+                        showSummary(unverifiedCount);
+                    }
+                })(1);
+
+                function parseCSV(data) {
+                    const rows = data.split('\n');
+                    return rows.map(row => row.split(','));
+                }
+
+                document.getElementById('downloadLog').onclick = function downloadLog() {
+                    const blob = new Blob([logContent], { type: 'text/plain' });
+                    const link = document.createElement('a');
+                    link.href = URL.createObjectURL(blob);
+                    link.download = 'verification_log.txt';
+                    link.click();
+                };
+            };
+            reader.readAsText(file);
+        }
+
+        function showInfo() {
+            document.getElementById('infoPopup').style.display = 'block';
+        }
+
+        function hideInfo() {
+            document.getElementById('infoPopup').style.display = 'none';
+        }
+
+        function showSummary(unverifiedCount) {
+            const summaryPopup = document.getElementById('summaryPopup');
+            const summaryText = document.getElementById('summaryText');
+
+            if (unverifiedCount === 0) {
+                summaryText.innerHTML = "<span style='color: green;'>All bets correctly verified.</span>";
+            } else {
+                summaryText.innerHTML = `<span style='color: red;'>${unverifiedCount} bet(s) were unable to be verified correctly.</span>`;
+            }
+
+            summaryPopup.style.display = 'block';
+        }
+
+        function hideSummary() {
+            document.getElementById('summaryPopup').style.display = 'none';
+        }
+    </script>
+</body>
+</html>
